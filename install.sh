@@ -121,9 +121,9 @@ get_server_ip() {
     log_info "检测到服务器 IP: $SERVER_IP"
 }
 
-# 克隆和编译项目
+# 下载预编译二进制
 build_project() {
-    log_info "克隆项目..."
+    log_info "下载 Port-Shaper..."
     
     # 清理旧版本
     if [[ -d "$INSTALL_DIR" ]]; then
@@ -131,28 +131,29 @@ build_project() {
         mv "$INSTALL_DIR" "${INSTALL_DIR}.bak.$(date +%s)"
     fi
     
-    # 克隆项目
-    git clone --depth 1 "$GITHUB_REPO" "$INSTALL_DIR" 2>/dev/null || {
-        log_warn "Git 克隆失败，使用本地构建..."
-        mkdir -p "$INSTALL_DIR"
-    }
-    
-    log_info "编译项目..."
+    # 创建目录
+    mkdir -p "$INSTALL_DIR"
     cd "$INSTALL_DIR"
     
-    # 设置 Go 环境
-    export PATH=$PATH:/usr/local/go/bin
-    export GOPROXY=https://proxy.golang.org,direct
+    # 下载预编译二进制（从 GitHub Releases）
+    DOWNLOAD_URL="https://github.com/coolapijust/DohShaper/releases/latest/download/port-shaper-linux-amd64"
     
-    # 编译
-    go build -o port-shaper ./cmd/shaper
-    
-    if [[ ! -f "$INSTALL_DIR/port-shaper" ]]; then
-        log_error "编译失败"
+    log_info "下载二进制文件..."
+    if ! curl -fsSL "$DOWNLOAD_URL" -o port-shaper; then
+        log_error "下载失败，请检查网络连接"
+        log_info "手动下载地址: $DOWNLOAD_URL"
         exit 1
     fi
     
-    log_success "编译完成"
+    # 添加执行权限
+    chmod +x port-shaper
+    
+    if [[ ! -f "$INSTALL_DIR/port-shaper" ]]; then
+        log_error "下载失败"
+        exit 1
+    fi
+    
+    log_success "下载完成"
 }
 
 # 创建配置文件
