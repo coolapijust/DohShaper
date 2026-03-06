@@ -249,9 +249,34 @@ configure_wizard() {
     export DOH_PATH ENABLE_TLS AUTO_CERT doh_domain cert_email tls_cert tls_key
 }
 
+# 备份现有配置
+backup_config() {
+    if [[ -f "$CONFIG_DIR/env" ]]; then
+        local backup_file="$CONFIG_DIR/env.backup.$(date +%Y%m%d_%H%M%S)"
+        cp "$CONFIG_DIR/env" "$backup_file"
+        log_info "已备份现有配置到: $backup_file"
+    fi
+}
+
 # 创建配置文件
 create_config() {
     log_info "创建配置文件..."
+    
+    # 备份现有配置
+    backup_config
+    
+    # 检查是否已有配置
+    if [[ -f "$CONFIG_DIR/env" ]]; then
+        log_info "检测到现有配置"
+        read -rp "是否使用现有配置? (Y/n): " use_existing
+        use_existing=${use_existing:-Y}
+        
+        if [[ "$use_existing" =~ ^[Yy]$ ]]; then
+            log_info "保留现有配置"
+            # 只更新二进制文件，不修改配置
+            return 0
+        fi
+    fi
     
     # 运行配置向导
     configure_wizard
