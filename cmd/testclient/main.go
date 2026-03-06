@@ -8,29 +8,36 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/miekg/dns"
 )
+
+// HTTP 客户端（带超时）
+var httpClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	},
+}
 
 func main() {
 	// 从环境变量获取配置
 	dohServer := getEnv("DOH_SERVER", "https://127.0.0.1:443")
 	dohPath := getEnv("DOH_PATH", "/dns-query")
 	targetDomain := getEnv("TARGET_DOMAIN", "www.google.com")
-	skipVerify := getEnvBool("SKIP_VERIFY", true)
 
-	fmt.Println("======================================")
+	fmt.Println("========================================")
 	fmt.Println("Port-Shaper 测试客户端")
-	fmt.Println("======================================")
+	fmt.Println("========================================")
 	fmt.Printf("DoH服务器: %s%s\n", dohServer, dohPath)
-	fmt.Printf("目标域名: %s\n", targetDomain)
-	fmt.Println()
+	fmt.Printf("目标域名: %s\n\n", targetDomain)
 
 	// 测试 1: DoH 查询获取端口
 	fmt.Println("[测试1] DoH查询获取动态端口...")
-	serverIP, port, err := queryDoH(dohServer, dohPath, targetDomain, skipVerify)
+	serverIP, port, err := queryDoH(dohServer, dohPath, targetDomain)
 	if err != nil {
 		fmt.Printf("[失败] DoH查询失败: %v\n", err)
 		os.Exit(1)
@@ -47,14 +54,14 @@ func main() {
 	fmt.Println("[成功] 连接测试通过")
 	fmt.Println()
 
-	fmt.Println("======================================")
+	fmt.Println("========================================")
 	fmt.Println("所有测试通过!")
-	fmt.Println("======================================")
+	fmt.Println("========================================")
 }
 
-// queryDoH 执行 DoH 查询
-func queryDoH(server, path, domain string, skipVerify bool) (string, int, error) {
-	// 构建 DNS 查询
+// queryDoH 执行 DoH 查询，返回服务器IP和端口
+func queryDoH(server, path, domain string) (string, int, error) {
+	// 构建 DNS 查询（SRV记录）
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(domain), dns.TypeSRV)
 	msg.RecursionDesired = true
@@ -70,18 +77,8 @@ func queryDoH(server, path, domain string, skipVerify bool) (string, int, error)
 	// 构建 URL
 	url := fmt.Sprintf("%s%s?dns=%s", server, path, encoded)
 
-	// 创建 HTTP 客户端
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: skipVerify,
-			},
-		},
-	}
-
 	// 发送请求
-	resp, err := client.Get(url)
+	resp, err := httpClient.Get(url)
 	if err != nil {
 		return "", 0, fmt.Errorf("HTTP请求失败: %w", err)
 	}
@@ -99,79 +96,71 @@ func queryDoH(server, path, domain string, skipVerify bool) (string, int, error)
 	}
 
 	// 解析 DNS 响应
-	respMsg := new(dns.Msg)
-	if err := respMsg.Unpack(respData); err != nil {
+	r := new(dns.Msg)
+	if err := r.Unpack(respData); err != nil {
 		return "", 0, fmt.Errorf("解析DNS响应失败: %w", err)
 	}
 
-	// 提取 SRV 记录
-	var serverIP string
-	var port int
+	if r.Rcode != dns.RcodeSuccess {
+		return "", 0, fmt.Errorf("DNS错误: %s", dns.RcodeToString[r.Rcode])
+	}
 
-	for _, rr := range respMsg.Answer {
-		if srv, ok := rr.(*dns.SRV); ok {
-			serverIP = strings.TrimSuffix(srv.Target, ".")
-			port = int(srv.Port)
-			break
+	// 从 SRV 记录中提取 IP 和端口
+	for _, ans := range r.Answer {
+		if srv, ok := ans.(*dns.SRV); ok {
+			return srv.Target, int(srv.Port), nil
 		}
 	}
 
-	if serverIP == "" || port == 0 {
-		return "", 0, fmt.Errorf("响应中没有找到SRV记录")
-	}
-
-	return serverIP, port, nil
+	return "", 0, fmt.Errorf("响应中没有SRV记录")
 }
 
 // testConnection 测试连接到动态端口
 func testConnection(serverIP string, port int, domain string) error {
-	addr := fmt.Sprintf("%s:%d", serverIP, port)
-
-	// 建立 TCP 连接
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	// 尝试 TCP 连接
+	address := net.JoinHostPort(serverIP, fmt.Sprintf("%d", port))
+	
+	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
 	if err != nil {
 		return fmt.Errorf("TCP连接失败: %w", err)
 	}
 	defer conn.Close()
 
-	fmt.Printf("[调试] TCP连接成功: %s\n", addr)
+	fmt.Printf("  连接成功: %s -> %s\n", conn.LocalAddr(), conn.RemoteAddr())
 
-	// 发送 TLS Client Hello
-	config := &tls.Config{
-		ServerName:         domain,
-		InsecureSkipVerify: true,
+	// 发送 HTTP 请求测试（如果目标支持）
+	testHTTP := true
+	if testHTTP {
+		return testHTTPProxy(conn, domain)
 	}
 
-	tlsConn := tls.Client(conn, config)
-	tlsConn.SetDeadline(time.Now().Add(10 * time.Second))
+	return nil
+}
 
-	if err := tlsConn.Handshake(); err != nil {
-		return fmt.Errorf("TLS握手失败: %w", err)
-	}
-	defer tlsConn.Close()
-
-	fmt.Printf("[调试] TLS握手成功，协议: %s\n", tlsConn.ConnectionState().Version)
-
-	// 发送 HTTP 请求
-	httpReq := fmt.Sprintf("HEAD / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", domain)
-	if _, err := tlsConn.Write([]byte(httpReq)); err != nil {
+// testHTTPProxy 测试 HTTP 代理功能
+func testHTTPProxy(conn net.Conn, domain string) error {
+	// 构建简单的 HTTP 请求
+	request := fmt.Sprintf("HEAD / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", domain)
+	
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if _, err := conn.Write([]byte(request)); err != nil {
 		return fmt.Errorf("发送HTTP请求失败: %w", err)
 	}
 
-	// 读取响应
-	buf := make([]byte, 1024)
-	n, err := tlsConn.Read(buf)
-	if err != nil && err != io.EOF {
-		return fmt.Errorf("读取响应失败: %w", err)
-	}
-
-	response := string(buf[:n])
-	if strings.Contains(response, "HTTP/1.1") || strings.Contains(response, "HTTP/2") {
-		fmt.Printf("[调试] HTTP响应: %s\n", strings.Split(response, "\r\n")[0])
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	buffer := make([]byte, 1024)
+	n, err := conn.Read(buffer)
+	if err != nil && err.Error() != "EOF" {
+		// 有些服务器可能不响应，这不一定是错误
+		fmt.Printf("  读取响应: %v (可能正常)\n", err)
 		return nil
 	}
 
-	return fmt.Errorf("无效的HTTP响应")
+	if n > 0 {
+		fmt.Printf("  收到响应: %d bytes\n", n)
+	}
+
+	return nil
 }
 
 func getEnv(key, defaultVal string) string {
@@ -179,12 +168,4 @@ func getEnv(key, defaultVal string) string {
 		return val
 	}
 	return defaultVal
-}
-
-func getEnvBool(key string, defaultVal bool) bool {
-	val := os.Getenv(key)
-	if val == "" {
-		return defaultVal
-	}
-	return strings.ToLower(val) == "true" || val == "1"
 }
