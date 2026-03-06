@@ -306,9 +306,87 @@ EOF
     fi
     
     chmod 600 "$CONFIG_DIR/env"
-    
-    chmod 600 "$CONFIG_DIR/env"
     log_success "配置文件创建完成"
+    
+    # 如果启用了 AutoCert，立即申请证书
+    if [[ "$AUTO_CERT" == "true" ]]; then
+        request_certificate
+    fi
+}
+
+# 申请 Let's Encrypt 证书
+request_certificate() {
+    log_info "申请 Let's Encrypt 证书..."
+    
+    # 检查是否已安装 certbot
+    if ! command -v certbot &> /dev/null; then
+        log_info "安装 certbot..."
+        if command -v apt-get &> /dev/null; then
+            apt-get update -qq
+            apt-get install -y -qq certbot
+        elif command -v yum &> /dev/null; then
+            yum install -y certbot
+        else
+            log_error "无法自动安装 certbot，请手动安装"
+            exit 1
+        fi
+    fi
+    
+    # 创建证书目录
+    mkdir -p /etc/port-shaper/certs
+    
+    # 申请证书（使用 standalone 模式，需要暂时停止服务）
+    log_info "正在为 $doh_domain 申请证书..."
+    
+    # 确保 80 端口可用
+    if lsof -Pi :80 -sTCP:LISTEN -t >/dev/null 2>&1; then
+        log_warn "80 端口被占用，尝试使用 webroot 模式..."
+        # 创建临时 webroot
+        mkdir -p /tmp/certbot-webroot
+        certbot certonly --webroot -w /tmp/certbot-webroot \
+            -d "$doh_domain" \
+            --email "$cert_email" \
+            --agree-tos \
+            --non-interactive \
+            --quiet
+    else
+        certbot certonly --standalone \
+            -d "$doh_domain" \
+            --email "$cert_email" \
+            --agree-tos \
+            --non-interactive \
+            --quiet
+    fi
+    
+    if [[ $? -eq 0 ]]; then
+        # 创建证书链接
+        ln -sf "/etc/letsencrypt/live/$doh_domain/fullchain.pem" /etc/port-shaper/certs/cert.pem
+        ln -sf "/etc/letsencrypt/live/$doh_domain/privkey.pem" /etc/port-shaper/certs/key.pem
+        
+        # 更新配置文件中的证书路径
+        sed -i 's|^# SHAPER_TLS_CERT=.*|SHAPER_TLS_CERT=/etc/port-shaper/certs/cert.pem|' "$CONFIG_DIR/env"
+        sed -i 's|^# SHAPER_TLS_KEY=.*|SHAPER_TLS_KEY=/etc/port-shaper/certs/key.pem|' "$CONFIG_DIR/env"
+        
+        # 设置自动续期钩子
+        mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+        cat > /etc/letsencrypt/renewal-hooks/deploy/port-shaper.sh << 'EOF'
+#!/bin/bash
+# 证书续期后重启服务
+systemctl restart port-shaper
+EOF
+        chmod +x /etc/letsencrypt/renewal-hooks/deploy/port-shaper.sh
+        
+        log_success "证书申请成功！"
+        log_info "证书路径: /etc/port-shaper/certs/"
+        log_info "自动续期已配置"
+    else
+        log_error "证书申请失败"
+        log_info "请检查:"
+        log_info "  1. 域名 $doh_domain 是否已解析到本机"
+        log_info "  2. 80 端口是否可访问"
+        log_info "  3. 邮箱地址 $cert_email 是否有效"
+        exit 1
+    fi
 }
 
 # 创建 systemd 服务
