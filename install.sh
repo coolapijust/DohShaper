@@ -91,11 +91,27 @@ install_go() {
 get_server_ip() {
     log_info "获取服务器 IP..."
     
-    # 尝试多种方式获取 IP
-    SERVER_IP=$(curl -s -4 https://api.ip.sb/ip 2>/dev/null || \
-                curl -s -4 https://api.ipify.org 2>/dev/null || \
-                curl -s -4 https://ifconfig.me 2>/dev/null || \
-                hostname -I 2>/dev/null | awk '{print $1}')
+    # 方法1: 从默认网卡获取（绕过 WARP）
+    DEFAULT_IFACE=$(ip -4 route show default | awk '{print $5}' | head -n1)
+    if [[ -n "$DEFAULT_IFACE" ]]; then
+        SERVER_IP=$(ip -4 addr show "$DEFAULT_IFACE" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+    fi
+    
+    # 方法2: 从所有网卡中查找公网 IP
+    if [[ -z "$SERVER_IP" ]]; then
+        SERVER_IP=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -vE '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.)' | head -n1)
+    fi
+    
+    # 方法3: 使用 hostname
+    if [[ -z "$SERVER_IP" ]]; then
+        SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    
+    # 方法4: 通过网络请求（可能被 WARP 影响）
+    if [[ -z "$SERVER_IP" ]]; then
+        SERVER_IP=$(curl -s -4 --interface "$DEFAULT_IFACE" https://api.ip.sb/ip 2>/dev/null || \
+                    curl -s -4 https://api.ipify.org 2>/dev/null)
+    fi
     
     if [[ -z "$SERVER_IP" ]]; then
         log_error "无法自动获取服务器 IP，请手动设置"
