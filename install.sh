@@ -135,8 +135,8 @@ build_project() {
     mkdir -p "$INSTALL_DIR"
     cd "$INSTALL_DIR"
     
-    # 下载预编译二进制（从 GitHub Releases）
-    DOWNLOAD_URL="https://github.com/coolapijust/DohShaper/releases/latest/download/port-shaper-linux-amd64"
+    # 下载预编译二进制（从 GitHub 仓库 bin 目录）
+    DOWNLOAD_URL="https://raw.githubusercontent.com/coolapijust/DohShaper/main/bin/port-shaper-linux-amd64"
     
     log_info "下载二进制文件..."
     if ! curl -fsSL "$DOWNLOAD_URL" -o port-shaper; then
