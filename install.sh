@@ -178,14 +178,18 @@ build_project() {
 configure_wizard() {
     log_info "配置向导..."
     
+    # 从 /dev/tty 读取（支持管道模式）
+    exec 3<&0
+    exec 0</dev/tty
+    
     # DoH 路径
     echo ""
-    read -p "请输入 DoH 路径 [默认: /dns-query]: " input_path
+    read -rp "请输入 DoH 路径 [默认: /dns-query]: " input_path
     DOH_PATH=${input_path:-/dns-query}
     
     # 域名（用于 AutoCert）
     echo ""
-    read -p "请输入 DoH 域名（用于 Let's Encrypt 证书，可选）: " doh_domain
+    read -rp "请输入 DoH 域名（用于 Let's Encrypt 证书，可选）: " doh_domain
     
     # 证书配置
     if [[ -n "$doh_domain" ]]; then
@@ -194,20 +198,20 @@ configure_wizard() {
         echo "1) 使用 Let's Encrypt 自动申请证书 (AutoCert)"
         echo "2) 使用已有证书文件"
         echo "3) 不使用 TLS（仅用于测试）"
-        read -p "请选择 [1]: " cert_choice
+        read -rp "请选择 [1]: " cert_choice
         cert_choice=${cert_choice:-1}
         
         case $cert_choice in
             1)
                 ENABLE_TLS="true"
                 AUTO_CERT="true"
-                read -p "请输入邮箱地址（用于 Let's Encrypt）: " cert_email
+                read -rp "请输入邮箱地址（用于 Let's Encrypt）: " cert_email
                 ;;
             2)
                 ENABLE_TLS="true"
                 AUTO_CERT="false"
-                read -p "请输入证书文件路径: " tls_cert
-                read -p "请输入密钥文件路径: " tls_key
+                read -rp "请输入证书文件路径: " tls_cert
+                read -rp "请输入密钥文件路径: " tls_key
                 ;;
             *)
                 ENABLE_TLS="false"
@@ -217,17 +221,20 @@ configure_wizard() {
     else
         # 没有域名，询问是否使用自定义证书
         echo ""
-        read -p "是否使用自定义 TLS 证书? (y/N): " use_tls
+        read -rp "是否使用自定义 TLS 证书? (y/N): " use_tls
         if [[ "$use_tls" =~ ^[Yy]$ ]]; then
             ENABLE_TLS="true"
             AUTO_CERT="false"
-            read -p "请输入证书文件路径: " tls_cert
-            read -p "请输入密钥文件路径: " tls_key
+            read -rp "请输入证书文件路径: " tls_cert
+            read -rp "请输入密钥文件路径: " tls_key
         else
             ENABLE_TLS="false"
             AUTO_CERT="false"
         fi
     fi
+    
+    # 恢复 stdin
+    exec 0<&3
 }
 
 # 创建配置文件
