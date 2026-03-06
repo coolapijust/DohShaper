@@ -91,13 +91,21 @@ install_go() {
 get_server_ip() {
     log_info "获取服务器 IP..."
     
-    # 获取默认路由的网卡（复用 DNS-Shaper 逻辑）
-    DEFAULT_IFACE=$(ip -4 route show default | awk '{print $5}' | head -n1)
+    # 方法1: 从默认路由获取网卡
+    # 尝试多种格式匹配
+    DEFAULT_IFACE=$(ip -4 route show default 2>/dev/null | grep -oP 'dev\s+\K[^\s]+' | head -n1)
     
+    # 方法2: 如果失败，从所有网卡中找有公网 IP 的
     if [[ -z "$DEFAULT_IFACE" ]]; then
-        # 如果没有默认路由，尝试获取有公网 IP 的网卡
-        DEFAULT_IFACE=$(ip -4 addr show | grep "scope global" | head -n1 | awk '{print $2}')
-        DEFAULT_IFACE=${DEFAULT_IFACE%@*}
+        # 获取所有网卡名称
+        for iface in $(ip -4 link show | grep -oP '^\d+:\s+\K[^:@]+' | grep -v lo); do
+            # 检查是否有公网 IP
+            ip_addr=$(ip -4 addr show dev "$iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+            if [[ -n "$ip_addr" ]] && [[ ! "$ip_addr" =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.) ]]; then
+                DEFAULT_IFACE="$iface"
+                break
+            fi
+        done
     fi
     
     if [[ -z "$DEFAULT_IFACE" ]]; then
@@ -108,18 +116,10 @@ get_server_ip() {
     log_info "默认网卡: $DEFAULT_IFACE"
     
     # 获取该网卡的 IPv4 地址
-    IPV4_INFO=$(ip -4 addr show dev "$DEFAULT_IFACE" | grep "scope global" | head -n1)
-    
-    if [[ -z "$IPV4_INFO" ]]; then
-        log_error "网卡 $DEFAULT_IFACE 没有全局 IPv4 地址"
-        exit 1
-    fi
-    
-    # 解析 IPv4 地址
-    SERVER_IP=$(echo "$IPV4_INFO" | awk '{print $2}' | cut -d'/' -f1)
+    SERVER_IP=$(ip -4 addr show dev "$DEFAULT_IFACE" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
     
     if [[ -z "$SERVER_IP" ]]; then
-        log_error "无法自动获取服务器 IP，请手动设置"
+        log_error "网卡 $DEFAULT_IFACE 没有 IPv4 地址"
         exit 1
     fi
     
