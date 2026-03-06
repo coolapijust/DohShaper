@@ -174,6 +174,15 @@ build_project() {
     log_success "下载完成"
 }
 
+# 配置变量（全局）
+DOH_PATH="/dns-query"
+ENABLE_TLS="false"
+AUTO_CERT="false"
+doh_domain=""
+cert_email=""
+tls_cert=""
+tls_key=""
+
 # 交互式配置向导
 configure_wizard() {
     log_info "配置向导..."
@@ -235,6 +244,9 @@ configure_wizard() {
     
     # 恢复 stdin
     exec 0<&3
+    
+    # 导出变量供后续使用
+    export DOH_PATH ENABLE_TLS AUTO_CERT doh_domain cert_email tls_cert tls_key
 }
 
 # 创建配置文件
