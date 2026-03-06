@@ -91,15 +91,23 @@ install_go() {
 get_server_ip() {
     log_info "获取服务器 IP..."
     
-    # 方法1: 从默认路由获取网卡
-    # 尝试多种格式匹配
-    DEFAULT_IFACE=$(ip -4 route show default 2>/dev/null | grep -oP 'dev\s+\K[^\s]+' | head -n1)
+    # 方法1: 从默认路由获取网卡（优先 IPv6，其次 IPv4）
+    DEFAULT_IFACE=$(ip -6 route show default 2>/dev/null | grep -oP 'dev\s+\K[^\s]+' | head -n1)
+    if [[ -z "$DEFAULT_IFACE" ]]; then
+        DEFAULT_IFACE=$(ip -4 route show default 2>/dev/null | grep -oP 'dev\s+\K[^\s]+' | head -n1)
+    fi
     
     # 方法2: 如果失败，从所有网卡中找有公网 IP 的
     if [[ -z "$DEFAULT_IFACE" ]]; then
         # 获取所有网卡名称
-        for iface in $(ip -4 link show | grep -oP '^\d+:\s+\K[^:@]+' | grep -v lo); do
-            # 检查是否有公网 IP
+        for iface in $(ip link show | grep -oP '^\d+:\s+\K[^:@]+' | grep -v lo); do
+            # 优先检查 IPv6 公网地址
+            ip_addr=$(ip -6 addr show dev "$iface" 2>/dev/null | grep "scope global" | grep -v "temporary" | head -n1 | awk '{print $2}' | cut -d'/' -f1)
+            if [[ -n "$ip_addr" ]] && [[ ! "$ip_addr" =~ ^fe80: ]] && [[ ! "$ip_addr" =~ ^::1$ ]]; then
+                DEFAULT_IFACE="$iface"
+                break
+            fi
+            # 其次检查 IPv4 公网地址
             ip_addr=$(ip -4 addr show dev "$iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
             if [[ -n "$ip_addr" ]] && [[ ! "$ip_addr" =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.) ]]; then
                 DEFAULT_IFACE="$iface"
@@ -115,11 +123,16 @@ get_server_ip() {
     
     log_info "默认网卡: $DEFAULT_IFACE"
     
-    # 获取该网卡的 IPv4 地址
-    SERVER_IP=$(ip -4 addr show dev "$DEFAULT_IFACE" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+    # 优先获取 IPv6 地址
+    SERVER_IP=$(ip -6 addr show dev "$DEFAULT_IFACE" 2>/dev/null | grep "scope global" | grep -v "temporary" | head -n1 | awk '{print $2}' | cut -d'/' -f1)
+    
+    # 如果没有 IPv6，获取 IPv4
+    if [[ -z "$SERVER_IP" ]]; then
+        SERVER_IP=$(ip -4 addr show dev "$DEFAULT_IFACE" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+    fi
     
     if [[ -z "$SERVER_IP" ]]; then
-        log_error "网卡 $DEFAULT_IFACE 没有 IPv4 地址"
+        log_error "网卡 $DEFAULT_IFACE 没有 IP 地址"
         exit 1
     fi
     
