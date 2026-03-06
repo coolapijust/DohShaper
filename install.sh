@@ -174,9 +174,68 @@ build_project() {
     log_success "下载完成"
 }
 
+# 交互式配置向导
+configure_wizard() {
+    log_info "配置向导..."
+    
+    # DoH 路径
+    echo ""
+    read -p "请输入 DoH 路径 [默认: /dns-query]: " input_path
+    DOH_PATH=${input_path:-/dns-query}
+    
+    # 域名（用于 AutoCert）
+    echo ""
+    read -p "请输入 DoH 域名（用于 Let's Encrypt 证书，可选）: " doh_domain
+    
+    # 证书配置
+    if [[ -n "$doh_domain" ]]; then
+        echo ""
+        echo "证书选项:"
+        echo "1) 使用 Let's Encrypt 自动申请证书 (AutoCert)"
+        echo "2) 使用已有证书文件"
+        echo "3) 不使用 TLS（仅用于测试）"
+        read -p "请选择 [1]: " cert_choice
+        cert_choice=${cert_choice:-1}
+        
+        case $cert_choice in
+            1)
+                ENABLE_TLS="true"
+                AUTO_CERT="true"
+                read -p "请输入邮箱地址（用于 Let's Encrypt）: " cert_email
+                ;;
+            2)
+                ENABLE_TLS="true"
+                AUTO_CERT="false"
+                read -p "请输入证书文件路径: " tls_cert
+                read -p "请输入密钥文件路径: " tls_key
+                ;;
+            *)
+                ENABLE_TLS="false"
+                AUTO_CERT="false"
+                ;;
+        esac
+    else
+        # 没有域名，询问是否使用自定义证书
+        echo ""
+        read -p "是否使用自定义 TLS 证书? (y/N): " use_tls
+        if [[ "$use_tls" =~ ^[Yy]$ ]]; then
+            ENABLE_TLS="true"
+            AUTO_CERT="false"
+            read -p "请输入证书文件路径: " tls_cert
+            read -p "请输入密钥文件路径: " tls_key
+        else
+            ENABLE_TLS="false"
+            AUTO_CERT="false"
+        fi
+    fi
+}
+
 # 创建配置文件
 create_config() {
     log_info "创建配置文件..."
+    
+    # 运行配置向导
+    configure_wizard
     
     mkdir -p "$CONFIG_DIR"
     
@@ -190,7 +249,7 @@ SHAPER_SERVER_IP=$SERVER_IP
 SHAPER_DOH_PORT=443
 
 # DoH 路径
-SHAPER_DOH_PATH=/dns-query
+SHAPER_DOH_PATH=$DOH_PATH
 
 # 动态端口范围
 SHAPER_PORT_START=10000
@@ -203,16 +262,31 @@ SHAPER_PORT_TTL=5m
 SHAPER_RECORD_TTL=300
 
 # TLS 配置
-SHAPER_ENABLE_TLS=false
-# SHAPER_TLS_CERT=/path/to/cert.pem
-# SHAPER_TLS_KEY=/path/to/key.pem
+SHAPER_ENABLE_TLS=$ENABLE_TLS
+EOF
+
+    # 添加 TLS 证书配置
+    if [[ "$ENABLE_TLS" == "true" ]]; then
+        if [[ "$AUTO_CERT" == "true" ]]; then
+            cat >> "$CONFIG_DIR/env" << EOF
 
 # AutoCert 配置（Let's Encrypt）
-# SHAPER_AUTO_CERT=true
-# SHAPER_DOH_DOMAIN=doh.example.com
-# SHAPER_AUTO_CERT_EMAIL=admin@example.com
-# SHAPER_AUTO_CERT_DIR=/etc/port-shaper/certs
+SHAPER_AUTO_CERT=true
+SHAPER_DOH_DOMAIN=$doh_domain
+SHAPER_AUTO_CERT_EMAIL=$cert_email
+SHAPER_AUTO_CERT_DIR=/etc/port-shaper/certs
 EOF
+        else
+            cat >> "$CONFIG_DIR/env" << EOF
+
+# TLS 证书文件
+SHAPER_TLS_CERT=$tls_cert
+SHAPER_TLS_KEY=$tls_key
+EOF
+        fi
+    fi
+    
+    chmod 600 "$CONFIG_DIR/env"
     
     chmod 600 "$CONFIG_DIR/env"
     log_success "配置文件创建完成"
