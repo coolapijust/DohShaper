@@ -14,7 +14,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # 默认配置
-GITHUB_REPO="https://github.com/coolapijust/Port-Shaper.git"
+GITHUB_REPO="https://github.com/coolapijust/DohShaper.git"
 INSTALL_DIR="/opt/port-shaper"
 CONFIG_DIR="/etc/port-shaper"
 SERVICE_NAME="port-shaper"
@@ -154,7 +154,7 @@ build_project() {
     cd "$INSTALL_DIR"
     
     # 下载预编译二进制（从 GitHub Releases）
-    DOWNLOAD_URL="https://github.com/coolapijust/DohShaper/releases/download/1.0/port-shaper-linux-amd64"
+    DOWNLOAD_URL="https://github.com/coolapijust/DohShaper/releases/download/1.0/portshaper-linux-amd64"
     
     log_info "下载二进制文件..."
     if ! curl -fsSL -L "$DOWNLOAD_URL" -o port-shaper; then
