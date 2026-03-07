@@ -268,7 +268,8 @@ create_config() {
     # 检查是否已有配置
     if [[ -f "$CONFIG_DIR/env" ]]; then
         log_info "检测到现有配置"
-        read -rp "是否使用现有配置? (Y/n): " use_existing
+        # 管道模式下需要从 /dev/tty 读取
+        read -rp "是否使用现有配置? (Y/n): " use_existing < /dev/tty
         use_existing=${use_existing:-Y}
         
         if [[ "$use_existing" =~ ^[Yy]$ ]]; then
