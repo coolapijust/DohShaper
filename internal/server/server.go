@@ -163,34 +163,6 @@ func (s *Server) startECHRefreshTimer() {
 	}
 }
 
-// getECHRecord 获取 ECH 记录（带缓存检查）
-func (s *Server) getECHRecord(domain string) dns.RR {
-	s.echMu.RLock()
-	defer s.echMu.RUnlock()
-
-	if s.echConfig == nil || time.Now().After(s.echConfig.ExpiresAt) {
-		return nil
-	}
-
-	// 创建新的 HTTPS 记录，使用提取的 ECH 配置
-	https := &dns.HTTPS{
-		SVCB: dns.SVCB{
-			Hdr: dns.RR_Header{
-				Name:   domain,
-				Rrtype: dns.TypeHTTPS,
-				Class:  dns.ClassINET,
-				Ttl:    1800, // 30分钟 TTL
-			},
-			Priority: 1, // 默认优先级
-			Target:   ".", // 使用当前域名
-			Value: []dns.SVCBKeyValue{
-				&dns.SVCBECHConfig{ECH: s.echConfig.ECHConfig},
-			},
-		},
-	}
-	return https
-}
-
 // startDoH 启动 DoH 服务
 func (s *Server) startDoH() {
 	addr := net.JoinHostPort("", s.cfg.DoHPort)
@@ -367,9 +339,9 @@ func (s *Server) processDNSQuery(query *dns.Msg, r *http.Request) *dns.Msg {
 	for _, q := range query.Question {
 		switch q.Qtype {
 		case dns.TypeAAAA, dns.TypeA, dns.TypeSRV:
-			s.handleQuery(response, q.Name, r)
+			s.handleQuery(response, q.Name, q.Qtype, r)
 		case dns.TypeHTTPS:
-			s.handleHTTPSQuery(response, q.Name)
+			s.handleHTTPSQuery(response, q.Name, r)
 		}
 	}
 
@@ -377,21 +349,7 @@ func (s *Server) processDNSQuery(query *dns.Msg, r *http.Request) *dns.Msg {
 }
 
 // handleHTTPSQuery 处理 HTTPS 查询
-func (s *Server) handleHTTPSQuery(response *dns.Msg, domain string) {
-	domain = dns.Fqdn(domain)
-
-	// 获取 ECH 记录
-	echRecord := s.getECHRecord(domain)
-	if echRecord != nil {
-		response.Answer = append(response.Answer, echRecord)
-		fmt.Printf("[DoH] HTTPS record for %s (with ECH)\n", domain)
-	} else {
-		fmt.Printf("[DoH] HTTPS record for %s (no ECH available)\n", domain)
-	}
-}
-
-// handleQuery 处理查询
-func (s *Server) handleQuery(response *dns.Msg, domain string, r *http.Request) {
+func (s *Server) handleHTTPSQuery(response *dns.Msg, domain string, r *http.Request) {
 	domain = dns.Fqdn(domain)
 
 	// 提取客户端 IP
@@ -415,37 +373,145 @@ func (s *Server) handleQuery(response *dns.Msg, domain string, r *http.Request) 
 	// 记录到缓存
 	s.cache.Add(domain, clientIP, port)
 
-	// 创建 SRV 记录
-	srv := &dns.SRV{
-		Hdr: dns.RR_Header{
-			Name:   domain,
-			Rrtype: dns.TypeSRV,
-			Class:  dns.ClassINET,
-			Ttl:    uint32(s.cfg.RecordTTL),
+	https := &dns.HTTPS{
+		SVCB: dns.SVCB{
+			Hdr: dns.RR_Header{
+				Name:   domain,
+				Rrtype: dns.TypeHTTPS,
+				Class:  dns.ClassINET,
+				Ttl:    uint32(s.cfg.RecordTTL),
+			},
+			Priority: 1,
+			Target:   ".",
+			Value: []dns.SVCBKeyValue{
+				&dns.SVCBPort{Port: uint16(port)},
+			},
 		},
-		Priority: 0,
-		Weight:   0,
-		Port:     uint16(port),
-		Target:   dns.Fqdn(s.cfg.ServerIP),
-	}
-	response.Answer = append(response.Answer, srv)
-
-	// 添加 A 记录（服务器 IP）
-	a := &dns.A{
-		Hdr: dns.RR_Header{
-			Name:   dns.Fqdn(s.cfg.ServerIP),
-			Rrtype: dns.TypeA,
-			Class:  dns.ClassINET,
-			Ttl:    uint32(s.cfg.RecordTTL),
-		},
-		A: net.ParseIP(s.cfg.ServerIP).To4(),
-	}
-	if a.A != nil {
-		response.Extra = append(response.Extra, a)
 	}
 
-	fmt.Printf("[DoH] Allocated %s -> %s:%d (client: %s)\n",
-		domain, s.cfg.ServerIP, port, clientIP)
+	// 检查缓存中的 ECH
+	s.echMu.RLock()
+	echConfig := s.echConfig
+	s.echMu.RUnlock()
+
+	if echConfig != nil && time.Now().Before(echConfig.ExpiresAt) {
+		https.Value = append(https.Value, &dns.SVCBECHConfig{ECH: echConfig.ECHConfig})
+		fmt.Printf("[DoH] HTTPS record for %s (with ECH, port: %d)\n", domain, port)
+	} else {
+		fmt.Printf("[DoH] HTTPS record for %s (no ECH available, port: %d)\n", domain, port)
+	}
+
+	response.Answer = append(response.Answer, https)
+}
+
+// handleQuery 处理查询
+func (s *Server) handleQuery(response *dns.Msg, domain string, qtype uint16, r *http.Request) {
+	domain = dns.Fqdn(domain)
+
+	// 提取客户端 IP
+	clientIP := s.extractClientIP(r)
+
+	// 分配端口
+	port, err := s.portManager.Allocate(domain)
+	if err != nil {
+		fmt.Printf("[DoH] Failed to allocate port for %s: %v\n", domain, err)
+		response.Rcode = dns.RcodeServerFailure
+		return
+	}
+
+	// 启动动态监听器
+	if err := s.startDynamicListener(port, domain); err != nil {
+		fmt.Printf("[DoH] Failed to start listener for %s:%d: %v\n", domain, port, err)
+		response.Rcode = dns.RcodeServerFailure
+		return
+	}
+
+	// 记录到缓存
+	s.cache.Add(domain, clientIP, port)
+
+	// 处理 s.cfg.ServerIP 可能带端口的情况 (移除意外的端口部分)
+	serverIPStr := s.cfg.ServerIP
+	if host, _, err := net.SplitHostPort(serverIPStr); err == nil {
+		serverIPStr = host
+	}
+	serverIP := net.ParseIP(serverIPStr)
+
+	switch qtype {
+	case dns.TypeSRV:
+		srv := &dns.SRV{
+			Hdr: dns.RR_Header{
+				Name:   domain,
+				Rrtype: dns.TypeSRV,
+				Class:  dns.ClassINET,
+				Ttl:    uint32(s.cfg.RecordTTL),
+			},
+			Priority: 0,
+			Weight:   0,
+			Port:     uint16(port),
+			Target:   domain,
+		}
+		response.Answer = append(response.Answer, srv)
+	case dns.TypeA:
+		if serverIP != nil && serverIP.To4() != nil {
+			a := &dns.A{
+				Hdr: dns.RR_Header{
+					Name:   domain,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+					Ttl:    uint32(s.cfg.RecordTTL),
+				},
+				A: serverIP.To4(),
+			}
+			response.Answer = append(response.Answer, a)
+		}
+	case dns.TypeAAAA:
+		if serverIP != nil {
+			if serverIP.To4() == nil && serverIP.To16() != nil {
+				aaaa := &dns.AAAA{
+					Hdr: dns.RR_Header{
+						Name:   domain,
+						Rrtype: dns.TypeAAAA,
+						Class:  dns.ClassINET,
+						Ttl:    uint32(s.cfg.RecordTTL),
+					},
+					AAAA: serverIP.To16(),
+				}
+				response.Answer = append(response.Answer, aaaa)
+			}
+		}
+	}
+
+	// 辅助解析记录 (如果客户端请求 SRV，可能需要附带 A/AAAA 以免产生额外查询)
+	if qtype == dns.TypeSRV {
+		if serverIP != nil {
+			if serverIP.To4() != nil {
+				extraA := &dns.A{
+					Hdr: dns.RR_Header{
+						Name:   domain,
+						Rrtype: dns.TypeA,
+						Class:  dns.ClassINET,
+						Ttl:    uint32(s.cfg.RecordTTL),
+					},
+					A: serverIP.To4(),
+				}
+				response.Extra = append(response.Extra, extraA)
+			} else if serverIP.To16() != nil {
+				extraAAAA := &dns.AAAA{
+					Hdr: dns.RR_Header{
+						Name:   domain,
+						Rrtype: dns.TypeAAAA,
+						Class:  dns.ClassINET,
+						Ttl:    uint32(s.cfg.RecordTTL),
+					},
+					AAAA: serverIP.To16(),
+				}
+				response.Extra = append(response.Extra, extraAAAA)
+			}
+		}
+	}
+
+	fmt.Printf("[DoH] Allocated %s -> %s:%d (client: %s, qtype: %s)\n",
+		domain, serverIPStr, port, clientIP, dns.TypeToString[qtype])
 }
 
 // startDynamicListener 启动动态监听器
